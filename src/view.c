@@ -191,6 +191,17 @@ static inline bool window_node_is_right_child(struct window_node *node)
     return node->parent && node->parent->right == node;
 }
 
+static inline bool window_node_is_occluded_by_zoom(struct window_node *node)
+{
+    if (!node->parent) return false;
+    
+    if (window_node_is_right_child(node) && node->parent->left->zoom == node->parent)
+      return true;
+    else if (window_node_is_left_child(node) && node->parent->right->zoom == node->parent)
+      return true;
+    return window_node_is_occluded_by_zoom(node->parent);
+}
+
 static inline struct equalize_node equalize_node_add(struct equalize_node a, struct equalize_node b)
 {
     return (struct equalize_node) { a.y_count + b.y_count, a.x_count + b.x_count, };
@@ -550,11 +561,21 @@ struct window_node *view_find_window_node_in_direction(struct view *view, struct
 
     struct window_node *target = window_node_find_first_leaf(view->root);
     while (target) {
-        if (source == target) goto next;
+        if (target->zoom == view->root) {
+          if (target != source) return target;
+          else return NULL;
+        }
 
-        CGPoint target_area_max = { target->area.x + target->area.w, target->area.y + target->area.h };
-        if (area_is_in_direction(&source->area, source_area_max, &target->area, target_area_max, direction)) {
-            int distance = area_distance_in_direction(&source->area, source_area_max, &target->area, target_area_max, direction);
+        if (source == target || window_node_is_occluded_by_zoom(target))
+          goto next;
+
+        struct area* target_area = target->zoom
+                                    ? &target->zoom->area
+                                    : &target->area;
+
+        CGPoint target_area_max = { target_area->x + target_area->w, target_area->y + target_area->h };
+        if (area_is_in_direction(&source->area, source_area_max, target_area, target_area_max, direction)) {
+            int distance = area_distance_in_direction(&source->area, source_area_max, target_area, target_area_max, direction);
             int rank = window_manager_find_rank_of_window_in_list(target->window_order[0], window_list, window_count);
             if ((distance < best_distance) || (distance == best_distance && rank < best_rank)) {
                 best_node = target;
