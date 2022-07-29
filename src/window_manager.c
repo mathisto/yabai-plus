@@ -1760,7 +1760,7 @@ void window_manager_toggle_window_fullscreen(struct space_manager *sm, struct wi
     struct window_node *node = view_find_window_node(view, window->id);
     assert(node);
 
-    if (node->zoom) {
+    if (node->zoom == view->root) {
         node->zoom = NULL;
     } else {
         node->zoom = view->root;
