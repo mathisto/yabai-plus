@@ -134,6 +134,13 @@ static inline float window_node_get_gap(struct view *view)
     return view->enable_gap ? view->window_gap*0.5f : 0.0f;
 }
 
+static inline void area_round(struct area* area) {
+    area->x = (int)(area->x + 0.999);
+    area->y = (int)(area->y + 0.999);
+    area->w = (int)(area->w + 0.999);
+    area->h = (int)(area->h + 0.999);
+}
+
 static void area_make_pair(struct view *view, struct window_node *node)
 {
     enum window_node_split split = window_node_get_split(node);
@@ -162,6 +169,8 @@ static void area_make_pair(struct view *view, struct window_node *node)
         node->right->area.h -= gap;
     }
 
+    area_round(&node->left->area);
+    area_round(&node->right->area);
     node->split = split;
     node->ratio = ratio;
 }
