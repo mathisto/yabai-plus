@@ -690,7 +690,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_WINDOW_DEMINIMIZED)
         debug("%s: window %s %d is deminimized on active space\n", __FUNCTION__, window->application->name, window->id);
         if (window->border.id && border_should_order_in(window)) {
             border_ensure_same_space(window);
-            SLSOrderWindow(g_connection, window->border.id, 1, window->id);
+            SLSOrderWindow(g_connection, window->border.id, -1, window->id);
         }
         if (window_manager_should_manage_window(window) && !window_manager_find_managed_window(&g_window_manager, window)) {
             struct window *last_window = window_manager_find_window(&g_window_manager, g_window_manager.last_window_id);
@@ -745,6 +745,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_SLS_WINDOW_MOVED)
     if (border->id && border_should_order_in(window)) {
         CGRect frame = {};
         SLSGetWindowBounds(g_connection, window_id, &frame);
+        frame = CGRectInset(frame, -BORDER_OFFSET, -BORDER_OFFSET);
         SLSMoveWindow(g_connection, border->id, &frame.origin);
     }
 
@@ -794,7 +795,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_SLS_WINDOW_ORDER_CHANGED)
         int window_level = 0;
         SLSGetWindowLevel(g_connection, window_id, &window_level);
         SLSSetWindowLevel(g_connection, border->id, window_level);
-        SLSOrderWindow(g_connection, border->id, 1, window_id);
+        SLSOrderWindow(g_connection, border->id, -1, window_id);
     }
 
     return EVENT_SUCCESS;
@@ -818,7 +819,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_SLS_WINDOW_IS_VISIBLE)
     struct border *border = &window->border;
     if (border->id && border_should_order_in(window)) {
         border_ensure_same_space(window);
-        SLSOrderWindow(g_connection, border->id, 1, window_id);
+        SLSOrderWindow(g_connection, border->id, -1, window_id);
     }
 
     return EVENT_SUCCESS;

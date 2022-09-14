@@ -483,7 +483,7 @@ static void window_manager_destroy_window_proxy(struct window *window, struct wi
 {
     if (window->border.id) {
         SLSDisableUpdate(g_connection);
-        SLSSetWindowTransform(g_connection, window->border.id, CGAffineTransformMakeTranslation(-window->frame.origin.x, -window->frame.origin.y));
+        SLSSetWindowTransform(g_connection, window->border.id, CGAffineTransformMakeTranslation(-window->frame.origin.x + BORDER_OFFSET, -window->frame.origin.y + BORDER_OFFSET));
         border_resize(window);
         SLSReenableUpdate(g_connection);
     }
@@ -492,20 +492,23 @@ static void window_manager_destroy_window_proxy(struct window *window, struct wi
     SLSReleaseWindow(g_connection, proxy->wid);
 }
 
-#define ANIMATE_WINDOW_ONE_FRAME(window, proxy, fx, fy, fw, fh)                                                                  \
-{                                                                                                                                \
-    float target_x = lerp(proxy.frame.origin.x,    mt, fx);                                                                      \
-    float target_y = lerp(proxy.frame.origin.y,    mt, fy);                                                                      \
-    float target_w = lerp(proxy.frame.size.width,  mt, fw);                                                                      \
-    float target_h = lerp(proxy.frame.size.height, mt, fh);                                                                      \
-                                                                                                                                 \
-    CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x, -target_y);                                        \
-    CGAffineTransform scale = CGAffineTransformMakeScale(proxy.frame.size.width / target_w, proxy.frame.size.height / target_h); \
-    CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                      \
-    SLSTransactionSetWindowTransform(transaction, proxy.wid, 0, 0, combined);                                                    \
-    if (window->border.id) {                                                                                                     \
-        SLSTransactionSetWindowTransform(transaction, window->border.id, 0, 0, combined);                                        \
-    }                                                                                                                            \
+#define ANIMATE_WINDOW_ONE_FRAME(window, proxy, fx, fy, fw, fh)                                                                      \
+{                                                                                                                                    \
+    float target_x = lerp(proxy.frame.origin.x,    mt, fx);                                                                          \
+    float target_y = lerp(proxy.frame.origin.y,    mt, fy);                                                                          \
+    float target_w = lerp(proxy.frame.size.width,  mt, fw);                                                                          \
+    float target_h = lerp(proxy.frame.size.height, mt, fh);                                                                          \
+                                                                                                                                     \
+    CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x, -target_y);                                            \
+    CGAffineTransform scale = CGAffineTransformMakeScale(proxy.frame.size.width / target_w, proxy.frame.size.height / target_h);     \
+    CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                          \
+    SLSTransactionSetWindowTransform(transaction, proxy.wid, 0, 0, combined);                                                        \
+    if (window->border.id) {                                                                                                         \
+        CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x + BORDER_OFFSET, -target_y + BORDER_OFFSET);        \
+        CGAffineTransform scale = CGAffineTransformMakeScale((proxy.frame.size.width + BORDER_OFFSET) / (target_w + BORDER_OFFSET), (proxy.frame.size.height + BORDER_OFFSET) / (target_h + BORDER_OFFSET)); \
+        CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                      \
+        SLSTransactionSetWindowTransform(transaction, window->border.id, 0, 0, combined);                                            \
+    }                                                                                                                                \
 }
 
 void window_manager_animate_window_list(struct window_animation *window_list, int window_count)
@@ -764,6 +767,7 @@ struct window *window_manager_find_window_at_point_filtering_window(struct windo
     int window_cid;
 
     SLSFindWindowByGeometry(g_connection, filter_wid, -1, 0, &point, &window_point, &window_id, &window_cid);
+    if (g_connection == window_cid) SLSFindWindowByGeometry(g_connection, window_id, -1, 0, &point, &window_point, &window_id, &window_cid);
     return window_manager_find_window(wm, window_id);
 }
 

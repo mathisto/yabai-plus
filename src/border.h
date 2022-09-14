@@ -1,6 +1,7 @@
 #ifndef BORDER_H
 #define BORDER_H
 
+#define BORDER_OFFSET 4
 struct border
 {
     uint32_t id;
