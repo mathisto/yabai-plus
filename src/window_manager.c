@@ -354,14 +354,11 @@ enum window_op_error window_manager_move_window_relative(struct window_manager *
         dy += window->frame.origin.y;
     }
 
-    AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
-        window_manager_move_window(window, dx, dy);
-    });
-
+    window_manager_animate_window(window, dx, dy, window->frame.size.width, window->frame.size.height);
     return WINDOW_OP_ERROR_SUCCESS;
 }
 
-void window_manager_resize_window_relative_internal(struct window *window, CGRect frame, int direction, float dx, float dy)
+void window_manager_resize_window_relative_internal(struct window *window, CGRect frame, int direction, float dx, float dy, bool animate)
 {
     int x_mod = (direction & HANDLE_LEFT) ? -1 : (direction & HANDLE_RIGHT)  ? 1 : 0;
     int y_mod = (direction & HANDLE_TOP)  ? -1 : (direction & HANDLE_BOTTOM) ? 1 : 0;
@@ -371,13 +368,17 @@ void window_manager_resize_window_relative_internal(struct window *window, CGRec
     float fx = (direction & HANDLE_LEFT) ? frame.origin.x + frame.size.width  - fw : frame.origin.x;
     float fy = (direction & HANDLE_TOP)  ? frame.origin.y + frame.size.height - fh : frame.origin.y;
 
-    AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
-        window_manager_move_window(window, fx, fy);
-        window_manager_resize_window(window, fw, fh);
-    });
+    if (animate) {
+        window_manager_animate_window(window, fx, fy, fw, fh);
+    } else {
+        AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
+            window_manager_move_window(window, fx, fy);
+            window_manager_resize_window(window, fw, fh);
+        });
+    }
 }
 
-enum window_op_error window_manager_resize_window_relative(struct window_manager *wm, struct window *window, int direction, float dx, float dy)
+enum window_op_error window_manager_resize_window_relative(struct window_manager *wm, struct window *window, int direction, float dx, float dy, bool animate)
 {
     struct view *view = window_manager_find_managed_window(wm, window);
     if (view) {
@@ -409,11 +410,13 @@ enum window_op_error window_manager_resize_window_relative(struct window_manager
         view_flush(view);
     } else {
         if (direction == HANDLE_ABS) {
-            AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
-                window_manager_resize_window(window, dx, dy);
-            });
+            if (animate) {
+                window_manager_animate_window(window, window->frame.origin.x, window->frame.origin.y, dx, dy);
+            } else {
+                AX_ENHANCED_UI_WORKAROUND(window->application->ref, { window_manager_resize_window(window, dx, dy); });
+            }
         } else {
-            window_manager_resize_window_relative_internal(window, window->frame, direction, dx, dy);
+            window_manager_resize_window_relative_internal(window, window->frame, direction, dx, dy, animate);
         }
     }
 
@@ -440,6 +443,120 @@ void window_manager_resize_window(struct window *window, float width, float heig
     CFRelease(size_ref);
 }
 
+static void window_manager_create_window_proxy(struct window *window, struct window_proxy *proxy)
+{
+    CFArrayRef images = SLSHWCaptureWindowList(g_connection, &window->id, 1, (1 << 11) | (1 << 8));
+
+    CFTypeRef frame_region;
+    SLSGetWindowBounds(g_connection, window->id, &proxy->frame);
+    CGSNewRegionWithRect(&proxy->frame, &frame_region);
+    SLSNewWindow(g_connection, 2, 0, 0, frame_region, &proxy->wid);
+
+    int level = 0;
+    SLSGetWindowLevel(g_connection, window->id, &level);
+
+    uint64_t tag = 1ULL << 46;
+    SLSSetWindowTags(g_connection, proxy->wid, &tag, 64);
+
+    sls_window_disable_shadow(proxy->wid);
+    SLSSetWindowOpacity(g_connection, proxy->wid, 0);
+    SLSSetWindowResolution(g_connection, proxy->wid, 2.0f);
+    SLSSetWindowAlpha(g_connection, proxy->wid, 1.0f);
+    SLSSetWindowLevel(g_connection, proxy->wid, CGWindowLevelForKey(level));
+    proxy->context = SLWindowContextCreate(g_connection, proxy->wid, 0);
+
+    CGRect frame = { {0, 0}, proxy->frame.size };
+    SLSDisableUpdate(g_connection);
+    SLSOrderWindow(g_connection, proxy->wid, 0, window->id);
+    CGContextClearRect(proxy->context, frame);
+    CGContextDrawImage(proxy->context, frame, (CGImageRef) CFArrayGetValueAtIndex(images, 0));
+    CGContextFlush(proxy->context);
+    SLSOrderWindow(g_connection, proxy->wid, -1, window->id);
+    scripting_addition_order_window(window->id, 0, 0);
+    SLSReenableUpdate(g_connection);
+
+    CFRelease(frame_region);
+    CFRelease(images);
+}
+
+static void window_manager_destroy_window_proxy(struct window *window, struct window_proxy *proxy)
+{
+    if (window->border.id) {
+        SLSDisableUpdate(g_connection);
+        SLSSetWindowTransform(g_connection, window->border.id, CGAffineTransformMakeTranslation(-window->frame.origin.x, -window->frame.origin.y));
+        border_resize(window);
+        SLSReenableUpdate(g_connection);
+    }
+    scripting_addition_order_window(window->id, 1, proxy->wid);
+    CGContextRelease(proxy->context);
+    SLSReleaseWindow(g_connection, proxy->wid);
+}
+
+#define ANIMATE_WINDOW_ONE_FRAME(window, proxy, fx, fy, fw, fh)                                                                  \
+{                                                                                                                                \
+    float target_x = lerp(proxy.frame.origin.x,    mt, fx);                                                                      \
+    float target_y = lerp(proxy.frame.origin.y,    mt, fy);                                                                      \
+    float target_w = lerp(proxy.frame.size.width,  mt, fw);                                                                      \
+    float target_h = lerp(proxy.frame.size.height, mt, fh);                                                                      \
+                                                                                                                                 \
+    CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x, -target_y);                                        \
+    CGAffineTransform scale = CGAffineTransformMakeScale(proxy.frame.size.width / target_w, proxy.frame.size.height / target_h); \
+    CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                      \
+    SLSTransactionSetWindowTransform(transaction, proxy.wid, 0, 0, combined);                                                    \
+    if (window->border.id) {                                                                                                     \
+        SLSTransactionSetWindowTransform(transaction, window->border.id, 0, 0, combined);                                        \
+    }                                                                                                                            \
+}
+
+void window_manager_animate_window_list(struct window_animation *window_list, int window_count)
+{
+    if (window_list == NULL || window_count == 0) return;
+    if (g_window_manager.window_animation_duration) {
+        for (int i = 0; i < window_count; ++i) {
+            window_manager_create_window_proxy(window_list[i].window, &window_list[i].proxy);
+        }
+
+        for (int i = 0; i < window_count; ++i) {
+            window_manager_set_window_frame(window_list[i].window, window_list[i].area.x, window_list[i].area.y, window_list[i].area.w, window_list[i].area.h);
+        }
+
+        ANIMATE(g_window_manager.window_animation_duration, ease_in_out_back, {
+            for (int i = 0; i < window_count; ++i) {
+                ANIMATE_WINDOW_ONE_FRAME(window_list[i].window, window_list[i].proxy, window_list[i].area.x, window_list[i].area.y, window_list[i].area.w, window_list[i].area.h);
+            }}
+        );
+
+        SLSDisableUpdate(g_connection);
+        for (int i = 0; i < window_count; ++i) {
+            window_manager_destroy_window_proxy(window_list[i].window, &window_list[i].proxy);
+        }
+        SLSReenableUpdate(g_connection);
+    } else {
+        for (int i = 0; i < window_count; ++i) {
+            window_manager_set_window_frame(window_list[i].window, window_list[i].area.x, window_list[i].area.y, window_list[i].area.w, window_list[i].area.h);
+        }
+    }
+}
+
+void window_manager_animate_window(struct window *window, float x, float y, float width, float height)
+{
+    if (g_window_manager.window_animation_duration) {
+        struct window_proxy proxy;
+        window_manager_create_window_proxy(window, &proxy);
+        window_manager_set_window_frame(window, x, y, width, height);
+
+        ANIMATE(g_window_manager.window_animation_duration, ease_in_out_back, {
+            ANIMATE_WINDOW_ONE_FRAME(window, proxy, x, y, width, height);
+        });
+
+        SLSDisableUpdate(g_connection);
+        window_manager_destroy_window_proxy(window, &proxy);
+        SLSReenableUpdate(g_connection);
+    } else {
+        window_manager_set_window_frame(window, x, y, width, height);
+    }
+}
+
 void window_manager_set_window_frame(struct window *window, float x, float y, float width, float height)
 {
     //
@@ -453,7 +570,6 @@ void window_manager_set_window_frame(struct window *window, float x, float y, fl
     //
 
     AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
-
         // NOTE(koekeishiya): Due to macOS constraints (visible screen-area), we might need to resize the window *before* moving it.
         window_manager_resize_window(window, width, height);
 
@@ -1014,6 +1130,7 @@ struct window *window_manager_create_and_add_window(struct space_manager *sm, st
     if (window_is_unknown(window)) {
         debug("%s: ignoring AXUnknown window %s %d\n", __FUNCTION__, window->application->name, window->id);
         window_manager_remove_lost_focused_event(wm, window->id);
+        border_destroy(window);
         window_destroy(window);
         return NULL;
     }
@@ -1021,6 +1138,7 @@ struct window *window_manager_create_and_add_window(struct space_manager *sm, st
     if (window_is_popover(window)) {
         debug("%s: ignoring AXPopover window %s %d\n", __FUNCTION__, window->application->name, window->id);
         window_manager_remove_lost_focused_event(wm, window->id);
+        border_destroy(window);
         window_destroy(window);
         return NULL;
     }
@@ -1033,6 +1151,7 @@ struct window *window_manager_create_and_add_window(struct space_manager *sm, st
         window_manager_make_window_topmost(wm, window, true);
         window_manager_remove_lost_focused_event(wm, window->id);
         window_unobserve(window);
+        border_destroy(window);
         window_destroy(window);
         return NULL;
     }
@@ -1293,13 +1412,22 @@ enum window_op_error window_manager_warp_window(struct space_manager *sm, struct
 
             window_node_swap_window_list(a_node, b_node);
 
-            window_node_flush(a_node);
-            window_node_flush(b_node);
+            struct window_animation *window_list = NULL;
+            window_node_capture_windows(a_node, &window_list);
+            window_node_capture_windows(b_node, &window_list);
+            window_manager_animate_window_list(window_list, buf_len(window_list));
         }
     } else {
-        space_manager_untile_window(sm, a_view, a);
+        if (a_view->sid == b_view->sid) {
+            struct window_node *a_node_rm = view_remove_window_node(a_view, a);
+            struct window_node *a_node_add = view_add_window_node_with_insertion_point(b_view, a, b->id);
 
-        if (a_view->sid != b_view->sid) {
+            struct window_animation *window_list = NULL;
+            if (a_node_rm) window_node_capture_windows(a_node_rm, &window_list);
+            window_node_capture_windows(a_node_add, &window_list);
+            window_manager_animate_window_list(window_list, buf_len(window_list));
+        } else {
+            space_manager_untile_window(sm, a_view, a);
             window_manager_remove_managed_window(wm, a->id);
             window_manager_add_managed_window(wm, a, b_view);
 
@@ -1313,9 +1441,8 @@ enum window_op_error window_manager_warp_window(struct space_manager *sm, struct
             }
 
             space_manager_move_window_to_space(b_view->sid, a);
+            space_manager_tile_window_on_space_with_insertion_point(sm, a, b_view->sid, b->id);
         }
-
-        space_manager_tile_window_on_space_with_insertion_point(sm, a, b_view->sid, b->id);
     }
 
     return WINDOW_OP_ERROR_SUCCESS;
@@ -1371,8 +1498,10 @@ enum window_op_error window_manager_swap_window(struct space_manager *sm, struct
         }
     }
 
-    window_node_flush(a_node);
-    window_node_flush(b_node);
+    struct window_animation *window_list = NULL;
+    window_node_capture_windows(a_node, &window_list);
+    window_node_capture_windows(b_node, &window_list);
+    window_manager_animate_window_list(window_list, buf_len(window_list));
 
     return WINDOW_OP_ERROR_SUCCESS;
 }
@@ -1468,11 +1597,7 @@ enum window_op_error window_manager_apply_grid(struct space_manager *sm, struct 
     float fw = cw * w;
     float fh = ch * h;
 
-    AX_ENHANCED_UI_WORKAROUND(window->application->ref, {
-        window_manager_move_window(window, fx, fy);
-        window_manager_resize_window(window, fw, fh);
-    });
-
+    window_manager_animate_window(window, fx, fy, fw, fh);
     return WINDOW_OP_ERROR_SUCCESS;
 }
 
@@ -1850,6 +1975,7 @@ void window_manager_init(struct window_manager *wm)
     wm->active_window_opacity = 1.0f;
     wm->normal_window_opacity = 1.0f;
     wm->window_opacity_duration = 0.0f;
+    wm->window_animation_duration = 0.0f;
     wm->insert_feedback_windows = NULL;
     wm->insert_feedback_color = rgba_color_from_hex(0xffd75f5f);
     wm->active_border_color = rgba_color_from_hex(0xff775759);

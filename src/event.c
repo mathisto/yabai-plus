@@ -184,6 +184,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_APPLICATION_TERMINATED)
 
     for (int i = 0; i < window_count; ++i) {
         struct window *window = window_list[i];
+        border_destroy(window);
 
         struct view *view = window_manager_find_managed_window(&g_window_manager, window);
         if (view) {
@@ -485,6 +486,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_WINDOW_DESTROYED)
     struct window *window = context;
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
     assert(!window->id_ptr);
+    border_destroy(window);
 
     struct view *view = window_manager_find_managed_window(&g_window_manager, window);
     if (view) {
@@ -753,26 +755,8 @@ static EVENT_CALLBACK(EVENT_HANDLER_SLS_WINDOW_RESIZED)
 
     struct border *border = &window->border;
     if (border->id && border_should_order_in(window)) {
-        if (border->region) CFRelease(border->region);
-        if (border->path)   CGPathRelease(border->path);
-
-        CGRect frame = {};
-        SLSGetWindowBounds(g_connection, window_id, &frame);
-
-        CGSNewRegionWithRect(&frame, &border->region);
-        border->frame.size = frame.size;
-
-        border->path = CGPathCreateMutable();
-        CGPathAddRoundedRect(border->path, NULL, border->frame, 0, 0);
-
         SLSDisableUpdate(g_connection);
-        SLSOrderWindow(g_connection, border->id, 0, 0);
-        SLSSetWindowShape(g_connection, border->id, 0.0f, 0.0f, border->region);
-        CGContextClearRect(border->context, border->frame);
-        CGContextAddPath(border->context, border->path);
-        CGContextStrokePath(border->context);
-        CGContextFlush(border->context);
-        SLSOrderWindow(g_connection, border->id, 1, window->id);
+        border_resize(window);
         SLSReenableUpdate(g_connection);
     }
 
@@ -1103,7 +1087,7 @@ static EVENT_CALLBACK(EVENT_HANDLER_MOUSE_DRAGGED)
         if (point.x > frame_mid.x) direction |= HANDLE_RIGHT;
         if (point.y > frame_mid.y) direction |= HANDLE_BOTTOM;
 
-        window_manager_resize_window_relative_internal(g_mouse_state.window, frame, direction, dx, dy);
+        window_manager_resize_window_relative_internal(g_mouse_state.window, frame, direction, dx, dy, false);
 
         g_mouse_state.last_moved_time = event_time;
         g_mouse_state.down_location = point;

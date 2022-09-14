@@ -303,25 +303,32 @@ static void window_node_clear_zoom(struct window_node *node)
     }
 }
 
-void window_node_flush(struct window_node *node)
+void window_node_capture_windows(struct window_node *node, struct window_animation **window_list)
 {
     if (window_node_is_occupied(node)) {
         for (int i = 0; i < node->window_count; ++i) {
             struct window *window = window_manager_find_window(&g_window_manager, node->window_list[i]);
             if (window) {
                 if (node->zoom) {
-                    window_manager_set_window_frame(window, node->zoom->area.x, node->zoom->area.y, node->zoom->area.w, node->zoom->area.h);
+                    ts_buf_push(*window_list, ((struct window_animation) { .window = window, .area = node->zoom->area }));
                 } else {
-                    window_manager_set_window_frame(window, node->area.x, node->area.y, node->area.w, node->area.h);
+                    ts_buf_push(*window_list, ((struct window_animation) { .window = window, .area = node->area }));
                 }
             }
         }
     }
 
     if (!window_node_is_leaf(node)) {
-        window_node_flush(node->left);
-        window_node_flush(node->right);
+        window_node_capture_windows(node->left, window_list);
+        window_node_capture_windows(node->right, window_list);
     }
+}
+
+void window_node_flush(struct window_node *node)
+{
+    struct window_animation *window_list = NULL;
+    window_node_capture_windows(node, &window_list);
+    window_manager_animate_window_list(window_list, buf_len(window_list));
 }
 
 bool window_node_contains_window(struct window_node *node, uint32_t window_id)

@@ -707,3 +707,17 @@ bool scripting_addition_scale_window(uint32_t wid, float x, float y, float w, fl
 
     return scripting_addition_send_bytes(bytes, length);
 }
+
+bool scripting_addition_order_window(uint32_t wid, int order, uint32_t rel_wid)
+{
+    char bytes[0x100];
+
+    char length = 2;
+    pack(bytes, wid, length);
+    pack(bytes, order, length);
+    pack(bytes, rel_wid, length);
+    bytes[1] = 0x0E;
+    bytes[0] = length-1;
+
+    return scripting_addition_send_bytes(bytes, length);
+}

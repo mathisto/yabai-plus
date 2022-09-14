@@ -22,6 +22,38 @@ static const char *layer_str[] =
     [LAYER_ABOVE] = "above"
 };
 
+static inline float ease_in_out_back(float t)
+{
+    float c1 = 1.70158f;
+    float c2 = c1 * 1.525f;
+    return t < 0.5f ? (powf(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2 : (powf(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
+}
+
+#define ANIMATE(animation_duration, easing_function, code_block)                       \
+{                                                                                      \
+    int frame_duration = 4;                                                            \
+    int total_duration = (int)(animation_duration * 1000.0f);                          \
+    int frame_count = (int)(((float) total_duration / (float) frame_duration) + 0.5f); \
+                                                                                       \
+    int duration = 0;                                                                  \
+    for (int frame_index = 0; frame_index <= frame_count; ++frame_index) {             \
+        float t = (float) duration / (float) total_duration;                           \
+        if (t < 0.0f) t = 0.0f;                                                        \
+        if (t > 1.0f) t = 1.0f;                                                        \
+                                                                                       \
+        float mt = easing_function(t);                                                 \
+        CFTypeRef transaction = SLSTransactionCreate(g_connection);                    \
+                                                                                       \
+        code_block                                                                     \
+                                                                                       \
+        SLSTransactionCommit(transaction, 0);                                          \
+        CFRelease(transaction);                                                        \
+                                                                                       \
+        duration += frame_duration;                                                    \
+        usleep(frame_duration*1000);                                                   \
+    }                                                                                  \
+}
+
 static inline bool socket_open(int *sockfd)
 {
     *sockfd = socket(AF_UNIX, SOCK_STREAM, 0);

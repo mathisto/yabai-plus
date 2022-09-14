@@ -60,9 +60,9 @@ extern CGError CGSClearWindowTags(int cid, uint32_t wid, const int tags[2], size
 extern CGError CGSGetWindowBounds(int cid, uint32_t wid, CGRect *frame);
 extern CGError CGSGetWindowTransform(int cid, uint32_t wid, CGAffineTransform *t);
 extern CGError CGSSetWindowTransform(int cid, uint32_t wid, CGAffineTransform t);
+extern CGError CGSOrderWindow(int cid, uint32_t wid, int order, uint32_t rel_wid);
 extern void CGSManagedDisplaySetCurrentSpace(int cid, CFStringRef display_ref, uint64_t spid);
 extern uint64_t CGSManagedDisplayGetCurrentSpace(int cid, CFStringRef display_ref);
-extern CFArrayRef CGSCopyManagedDisplaySpaces(const int cid);
 extern CFStringRef CGSCopyManagedDisplayForSpace(const int cid, uint64_t spid);
 extern void CGSShowSpaces(int cid, CFArrayRef spaces);
 extern void CGSHideSpaces(int cid, CFArrayRef spaces);
@@ -762,6 +762,21 @@ static void do_window_shadow(char *message)
     }
 }
 
+static void do_window_order(char *message)
+{
+    uint32_t wid;
+    unpack(message, wid);
+    if (!wid) return;
+
+    int order;
+    unpack(message, order);
+
+    uint32_t rel_wid;
+    unpack(message, rel_wid);
+
+    CGSOrderWindow(_connection, wid, order, rel_wid);
+}
+
 static void do_handshake(int sockfd)
 {
     uint32_t attrib = 0;
@@ -829,6 +844,10 @@ static void handle_message(int sockfd, char *message)
     case 0x0D: {
         do_window_opacity(message);
     } break;
+    case 0x0E: {
+        do_window_order(message);
+    } break;
+
     }
 }
 

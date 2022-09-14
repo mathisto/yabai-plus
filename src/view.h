@@ -11,6 +11,20 @@ struct area
     float h;
 };
 
+struct window_proxy
+{
+    uint32_t wid;
+    CGContextRef context;
+    CGRect frame;
+};
+
+struct window_animation
+{
+    struct window *window;
+    struct area area;
+    struct window_proxy proxy;
+};
+
 struct equalize_node
 {
     int y_count;

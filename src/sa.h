@@ -6,6 +6,8 @@
 #define PAYLOAD_STATUS_NO_ATTRIB 2
 #define PAYLOAD_STATUS_CON_ERROR 3
 
+struct window_animation;
+
 int scripting_addition_check(void);
 int scripting_addition_load(void);
 bool scripting_addition_is_installed(void);
@@ -23,6 +25,7 @@ bool scripting_addition_set_sticky(uint32_t wid, bool sticky);
 bool scripting_addition_set_shadow(uint32_t wid, bool shadow);
 bool scripting_addition_focus_window(uint32_t wid);
 bool scripting_addition_scale_window(uint32_t wid, float x, float y, float w, float h);
+bool scripting_addition_order_window(uint32_t wid, int order, uint32_t rel_wid);
 
 extern bool workspace_is_macos_monterey(void);
 extern bool workspace_is_macos_bigsur(void);
