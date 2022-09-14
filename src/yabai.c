@@ -43,6 +43,8 @@ char g_config_file[4096];
 char g_lock_file[MAXLEN];
 bool g_verbose;
 
+struct mach_server g_mach_server;
+
 static int client_send_message(int argc, char **argv)
 {
     if (argc <= 1) {
@@ -59,10 +61,10 @@ static int client_send_message(int argc, char **argv)
 
     for (int i = 1; i < argc; ++i) {
         argl[i] = strlen(argv[i]);
-        message_length += argl[i];
+        message_length += argl[i] + 1;
     }
 
-    char *message = malloc(sizeof(int)+message_length);
+    char *message = malloc(sizeof(int)+message_length + 1);
     char *temp = sizeof(int)+message;
 
     memcpy(message, &message_length, sizeof(int));
@@ -73,45 +75,22 @@ static int client_send_message(int argc, char **argv)
     }
     *temp++ = '\0';
 
-    int sockfd;
-    char socket_file[MAXLEN];
-    snprintf(socket_file, sizeof(socket_file), SOCKET_PATH_FMT, user);
-
-    if (!socket_open(&sockfd)) {
-        error("yabai-msg: failed to open socket..\n");
-    }
-
-    if (!socket_connect(sockfd, socket_file)) {
-        error("yabai-msg: failed to connect to socket..\n");
-    }
-
-    if (send(sockfd, message, sizeof(int)+message_length, 0) == -1) {
-        error("yabai-msg: failed to send data..\n");
-    }
-
-    shutdown(sockfd, SHUT_WR);
-    free(message);
+    char* rsp = mach_send_message(mach_get_bs_port(),
+                                  message,
+                                  message_length,
+                                  true               );
 
     int result = EXIT_SUCCESS;
     FILE *output = stdout;
-    int bytes_read = 0;
-    char rsp[BUFSIZ];
 
-    while ((bytes_read = read(sockfd, rsp, sizeof(rsp)-1)) > 0) {
-        rsp[bytes_read] = '\0';
-
-        if (rsp[0] == FAILURE_MESSAGE[0]) {
-            result = EXIT_FAILURE;
-            output = stderr;
-            fprintf(output, "%s", rsp + 1);
-            fflush(output);
-        } else {
-            fprintf(output, "%s", rsp);
-            fflush(output);
-        }
+    if (!rsp) return result;
+    if (rsp[0] == FAILURE_MESSAGE[0]) {
+        result = EXIT_FAILURE;
+        output = stderr;
+        fprintf(output, "%s", rsp + 1);
+    } else {
+        fprintf(output, "%s", rsp);
     }
-
-    socket_close(sockfd);
     return result;
 }
 
@@ -331,9 +310,8 @@ int main(int argc, char **argv)
     SLSRegisterConnectionNotifyProc(g_connection, connection_handler, 815, NULL);
     SLSRegisterConnectionNotifyProc(g_connection, connection_handler, 816, NULL);
 
-    if (!message_loop_begin(g_socket_file)) {
-        error("yabai: could not initialize message_loop! abort..\n");
-    }
+    if (!mach_server_begin(&g_mach_server, mach_message_handler))
+      error("yabai: could not initialize daemon! abort..\n");
 
     if (!workspace_is_macos_monterey() && !workspace_is_macos_bigsur()) {
         if (scripting_addition_is_installed()) {

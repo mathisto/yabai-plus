@@ -7,6 +7,8 @@ extern int csr_get_active_config(uint32_t *config);
 #define SA_SOCKET_PATH_FMT      "/tmp/yabai-sa_%s.socket"
 extern char g_sa_socket_file[MAXLEN];
 
+mach_port_t g_sa_port = 0;
+
 @interface SALoader : NSObject<SBApplicationDelegate> {}
 - (void) eventDidFail:(const AppleEvent*)event withError:(NSError*)error;
 @end
@@ -190,33 +192,18 @@ static void scripting_addition_prepare_binaries(void)
 
 static bool scripting_addition_request_handshake(char *version, uint32_t *attrib)
 {
-    int sockfd;
-    bool result = false;
-    char rsp[BUFSIZ] = {};
     char bytes[0x100] = { 0x01, 0x0C };
+    char* response = mach_send_message(mach_get_bs_port_sa(), bytes, 2, true);
 
-    if (socket_open(&sockfd)) {
-        if (socket_connect(sockfd, g_sa_socket_file)) {
-            if (send(sockfd, bytes, 2, 0) != -1) {
-                int length = recv(sockfd, rsp, sizeof(rsp)-1, 0);
-                if (length <= 0) goto out;
+    if (!response) return false;
+    char *zero = response;
+    while (*zero != '\0') ++zero;
 
-                char *zero = rsp;
-                while (*zero != '\0') ++zero;
+    assert(*zero == '\0');
+    memcpy(version, response, zero - response + 1);
+    memcpy(attrib, zero+1, sizeof(uint32_t));
 
-                assert(*zero == '\0');
-                memcpy(version, rsp, zero - rsp + 1);
-                memcpy(attrib, zero+1, sizeof(uint32_t));
-
-                result = true;
-            }
-        }
-
-out:
-        socket_close(sockfd);
-    }
-
-    return result;
+    return true;
 }
 
 static int scripting_addition_perform_validation(bool loaded)
@@ -229,22 +216,22 @@ static int scripting_addition_perform_validation(bool loaded)
         return PAYLOAD_STATUS_CON_ERROR;
     }
 
-    debug("yabai: osax version = %s, osax attrib = 0x%X\n", version, attrib);
+    /* debug("yabai: osax version = %s, osax attrib = 0x%X\n", version, attrib); */
     bool is_latest_version_installed = scripting_addition_check() == 0;
 
     if (!string_equals(version, OSAX_VERSION)) {
         if (loaded && is_latest_version_installed) {
-            notify("scripting-addition", "payload is outdated, restart Dock.app!");
+            /* notify("scripting-addition", "payload is outdated, restart Dock.app!"); */
         } else {
-            notify("scripting-addition", "payload is outdated, please reinstall!");
+            /* notify("scripting-addition", "payload is outdated, please reinstall!"); */
         }
 
         return PAYLOAD_STATUS_OUTDATED;
     } else if ((attrib & OSAX_ATTRIB_ALL) != OSAX_ATTRIB_ALL) {
-        notify("scripting-addition", "payload (0x%X) doesn't support this macOS version!", attrib);
+        /* notify("scripting-addition", "payload (0x%X) doesn't support this macOS version!", attrib); */
         return PAYLOAD_STATUS_NO_ATTRIB;
     } else {
-        notify("scripting-addition", "payload v%s", version);
+        /* notify("scripting-addition", "payload v%s", version); */
         return PAYLOAD_STATUS_SUCCESS;
     }
 }
@@ -545,22 +532,11 @@ out:
 
 static bool scripting_addition_send_bytes(char *bytes, int length)
 {
-    int sockfd;
-    char dummy;
-    bool result = false;
+    if (!g_sa_port) g_sa_port = mach_get_bs_port_sa();
 
-    if (socket_open(&sockfd)) {
-        if (socket_connect(sockfd, g_sa_socket_file)) {
-            if (send(sockfd, bytes, length, 0) != -1) {
-                recv(sockfd, &dummy, 1, 0);
-                result = true;
-            }
-        }
-
-        socket_close(sockfd);
-    }
-
-    return result;
+    char* rsp = mach_send_message(g_sa_port, bytes, length, true);
+    if (rsp && *rsp == 'k') return true;
+    return false;
 }
 
 bool scripting_addition_focus_space(uint64_t sid)

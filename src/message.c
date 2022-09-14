@@ -2474,8 +2474,14 @@ snext:
     }
 }
 
-void handle_message(FILE *rsp, char *message)
+void handle_message_mach(struct mach_buffer* buffer)
 {
+    char* response = NULL;
+    char* message = (char*)((int*)buffer->message.descriptor.address + 1);
+    size_t length = 0;
+    FILE* rsp = open_memstream(&response, &length);
+    fprintf(rsp, "");
+
     struct token domain = get_token(&message);
     if (token_equals(domain, DOMAIN_CONFIG)) {
         handle_domain_config(rsp, domain, message);
@@ -2494,47 +2500,15 @@ void handle_message(FILE *rsp, char *message)
     } else {
         daemon_fail(rsp, "unknown domain '%.*s'\n", domain.length, domain.text);
     }
+
+    if (rsp) fclose(rsp);
+
+    mach_send_message(buffer->message.header.msgh_remote_port, response,
+                                                               length,
+                                                               false    );
+    if (response) free(response);
 }
 
-static void *message_loop_run(void *context)
-{
-    while (g_message_loop.is_running) {
-        int sockfd = accept(g_message_loop.sockfd, NULL, 0);
-        if (sockfd == -1) continue;
-
-        event_loop_post(&g_event_loop, DAEMON_MESSAGE, NULL, sockfd, NULL);
-    }
-
-    return NULL;
-}
-
-bool message_loop_begin(char *socket_path)
-{
-    struct sockaddr_un socket_address;
-    socket_address.sun_family = AF_UNIX;
-    snprintf(socket_address.sun_path, sizeof(socket_address.sun_path), "%s", socket_path);
-    unlink(socket_path);
-
-    if ((g_message_loop.sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
-        return false;
-    }
-
-    if (bind(g_message_loop.sockfd, (struct sockaddr *) &socket_address, sizeof(socket_address)) == -1) {
-        return false;
-    }
-
-    if (chmod(socket_path, 0600) != 0) {
-        return false;
-    }
-
-    if (listen(g_message_loop.sockfd, SOMAXCONN) == -1) {
-        return false;
-    }
-
-    fcntl(g_message_loop.sockfd, F_SETFD, FD_CLOEXEC | fcntl(g_message_loop.sockfd, F_GETFD));
-
-    g_message_loop.is_running = true;
-    pthread_create(&g_message_loop.thread, NULL, &message_loop_run, NULL);
-
-    return true;
+MACH_HANDLER(mach_message_handler) {
+  event_loop_post(&g_event_loop, MACH_MESSAGE, message, 0, NULL);
 }

@@ -2,9 +2,12 @@
 #include <mach-o/getsect.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
+#include <mach/message.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <mach/vm_page_size.h>
+#include <bootstrap.h>
+
 #include <objc/message.h>
 #include <objc/runtime.h>
 
@@ -41,8 +44,6 @@
 #define unpack(b,v) memcpy(&v, b, sizeof(v)); b += sizeof(v)
 
 #define lerp(a, t, b) (((1.0-t)*a) + (t*b))
-
-#define SOCKET_PATH_FMT "/tmp/yabai-sa_%s.socket"
 
 #define kCGSOnAllWorkspacesTagBit (1 << 11)
 #define kCGSNoShadowTagBit (1 << 3)
@@ -88,8 +89,30 @@ static uint64_t move_space_fp;
 static uint64_t set_front_window_fp;
 static Class managed_space;
 
-static pthread_t daemon_thread;
-static int daemon_sockfd;
+struct mach_message {
+  mach_msg_header_t header;
+  mach_msg_size_t msgh_descriptor_count;
+  mach_msg_ool_descriptor_t descriptor;
+};
+
+struct mach_buffer {
+  struct mach_message message;
+  mach_msg_trailer_t trailer;
+};
+
+#define MACH_HANDLER(name) void name(struct mach_buffer* message)
+typedef MACH_HANDLER(mach_handler);
+struct mach_server {
+  bool is_running;
+  mach_port_name_t task;
+  mach_port_t port;
+  mach_port_t bs_port;
+
+  pthread_t thread;
+  mach_handler* handler;
+};
+
+struct mach_server g_mach_server;
 
 static void dump_class_info(Class c)
 {
@@ -777,7 +800,138 @@ static void do_window_order(char *message)
     CGSOrderWindow(_connection, wid, order, rel_wid);
 }
 
-static void do_handshake(int sockfd)
+static mach_port_t mach_get_bs_port() {
+  mach_port_name_t task = mach_task_self();
+
+  mach_port_t bs_port;
+  if (task_get_special_port(task,
+                            TASK_BOOTSTRAP_PORT,
+                            &bs_port            ) != KERN_SUCCESS) {
+    return 0;
+  }
+
+  mach_port_t port;
+  if (bootstrap_look_up(bs_port,
+                        "git.felix.fyabai",
+                        &port                  ) != KERN_SUCCESS) {
+    return 0;
+  }
+
+  return port;
+}
+
+static void mach_receive_message(mach_port_t port, struct mach_buffer* buffer) {
+  *buffer = (struct mach_buffer) { 0 };
+  mach_msg_return_t msg_return;
+  msg_return = mach_msg(&buffer->message.header,
+                                        MACH_RCV_MSG,
+                                        0,
+                                        sizeof(struct mach_buffer),
+                                        port,
+                                        MACH_MSG_TIMEOUT_NONE,
+                                        MACH_PORT_NULL             );
+
+  if (msg_return != MACH_MSG_SUCCESS) {
+    buffer->message.descriptor.address = NULL;
+  }
+}
+
+static bool mach_send_message(mach_port_t port, char* message, uint32_t len) {
+  if (!message || !port) {
+    return false;
+  }
+
+  struct mach_message msg = { 0 };
+  msg.header.msgh_remote_port = port;
+  msg.header.msgh_bits = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND
+                                            & MACH_MSGH_BITS_REMOTE_MASK,
+                                            0,
+                                            0,
+                                            MACH_MSGH_BITS_COMPLEX       );
+
+  msg.header.msgh_size = sizeof(struct mach_message);
+
+  msg.msgh_descriptor_count = 1;
+  msg.descriptor.address = message;
+  msg.descriptor.size = len * sizeof(char);
+  msg.descriptor.copy = MACH_MSG_VIRTUAL_COPY;
+  msg.descriptor.deallocate = false;
+  msg.descriptor.type = MACH_MSG_OOL_DESCRIPTOR;
+
+  mach_msg_return_t msg_return = mach_msg(&msg.header,
+                                          MACH_SEND_MSG,
+                                          sizeof(struct mach_message),
+                                          0,
+                                          MACH_PORT_NULL,
+                                          MACH_MSG_TIMEOUT_NONE,
+                                          MACH_PORT_NULL              );
+
+  return msg_return == MACH_MSG_SUCCESS;
+}
+
+static void* mach_connection_handler(void *context) {
+  struct mach_server* server = context;
+  while (server->is_running) {
+    struct mach_buffer* buffer = malloc(sizeof(struct mach_buffer));
+    mach_receive_message(server->port, buffer);
+    server->handler(buffer);
+  }
+
+  return NULL;
+}
+
+static TABLE_HASH_FUNC(hash_wid)
+{
+    return *(uint32_t *) key;
+}
+
+static TABLE_COMPARE_FUNC(compare_wid)
+{
+    return *(uint32_t *) key_a == *(uint32_t *) key_b;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+bool mach_server_begin(struct mach_server* mach_server, mach_handler handler) {
+  mach_server->task = mach_task_self();
+
+  if (mach_port_allocate(mach_server->task,
+                         MACH_PORT_RIGHT_RECEIVE,
+                         &mach_server->port      ) != KERN_SUCCESS) {
+    return false;
+  }
+
+  if (mach_port_insert_right(mach_server->task,
+                             mach_server->port,
+                             mach_server->port,
+                             MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+    return false;
+  }
+
+  if (task_get_special_port(mach_server->task,
+                            TASK_BOOTSTRAP_PORT,
+                            &mach_server->bs_port) != KERN_SUCCESS) {
+    return false;
+  }
+
+  if (bootstrap_register(mach_server->bs_port,
+                         "git.felix.fyabai_sa",
+                         mach_server->port     ) != KERN_SUCCESS) {
+    return false;
+  }
+
+  init_instances();
+  pthread_mutex_init(&window_fade_lock, NULL);
+  table_init(&window_fade_table, 150, hash_wid, compare_wid);
+  mach_server->handler = handler;
+  mach_server->is_running = true;
+  pthread_create(&mach_server->thread, NULL, &mach_connection_handler,
+                                             mach_server              );
+
+  return true;
+}
+
+static void do_handshake(struct mach_buffer* buffer)
 {
     uint32_t attrib = 0;
 
@@ -798,11 +952,14 @@ static void do_handshake(int sockfd)
     bytes[version_length] = '\0';
     bytes[bytes_length] = '\n';
 
-    send(sockfd, bytes, bytes_length+1, 0);
+    mach_send_message(buffer->message.header.msgh_remote_port,
+                      bytes,
+                      bytes_length + 1                        );
 }
 
-static void handle_message(int sockfd, char *message)
+static void handle_message(struct mach_buffer* buffer)
 {
+    char* message = buffer->message.descriptor.address + 1;
     char op_code = *message++;
     switch (op_code) {
     case 0x01: {
@@ -839,7 +996,9 @@ static void handle_message(int sockfd, char *message)
         do_window_scale(message);
     } break;
     case 0x0C: {
-        do_handshake(sockfd);
+        do_handshake(buffer);
+        free(buffer);
+        return;
     } break;
     case 0x0D: {
         do_window_opacity(message);
@@ -849,83 +1008,8 @@ static void handle_message(int sockfd, char *message)
     } break;
 
     }
-}
-
-static inline bool read_message(int sockfd, char *message)
-{
-    int bytes_read    = 0;
-    int bytes_to_read = 0;
-
-    if (read(sockfd, &bytes_to_read, sizeof(char)) == sizeof(char)) {
-        do {
-            int cur_read = read(sockfd, message+bytes_read, bytes_to_read-bytes_read);
-            if (cur_read <= 0) break;
-
-            bytes_read += cur_read;
-        } while (bytes_read < bytes_to_read);
-        return bytes_read == bytes_to_read;
-    }
-
-    return false;
-}
-
-static void *handle_connection(void *unused)
-{
-    for (;;) {
-        int sockfd = accept(daemon_sockfd, NULL, 0);
-        if (sockfd == -1) continue;
-
-        char message[0x100];
-        if (read_message(sockfd, message)) {
-            handle_message(sockfd, message);
-        }
-
-        shutdown(sockfd, SHUT_RDWR);
-        close(sockfd);
-    }
-
-    return NULL;
-}
-
-static TABLE_HASH_FUNC(hash_wid)
-{
-    return *(uint32_t *) key;
-}
-
-static TABLE_COMPARE_FUNC(compare_wid)
-{
-    return *(uint32_t *) key_a == *(uint32_t *) key_b;
-}
-
-static bool start_daemon(char *socket_path)
-{
-    struct sockaddr_un socket_address;
-    socket_address.sun_family = AF_UNIX;
-    snprintf(socket_address.sun_path, sizeof(socket_address.sun_path), "%s", socket_path);
-    unlink(socket_path);
-
-    if ((daemon_sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
-        return false;
-    }
-
-    if (bind(daemon_sockfd, (struct sockaddr *) &socket_address, sizeof(socket_address)) == -1) {
-        return false;
-    }
-
-    if (chmod(socket_path, 0600) != 0) {
-        return false;
-    }
-
-    if (listen(daemon_sockfd, SOMAXCONN) == -1) {
-        return false;
-    }
-
-    init_instances();
-    pthread_mutex_init(&window_fade_lock, NULL);
-    table_init(&window_fade_table, 150, hash_wid, compare_wid);
-    pthread_create(&daemon_thread, NULL, &handle_connection, NULL);
-
-    return true;
+    mach_send_message(buffer->message.header.msgh_remote_port, "k", 2);
+    free(buffer);
 }
 
 void load_payload(void)
@@ -938,16 +1022,14 @@ void load_payload(void)
         return;
     }
 
-    char socket_file[255];
-    snprintf(socket_file, sizeof(socket_file), SOCKET_PATH_FMT, user);
-
-    if (start_daemon(socket_file)) {
+    if (mach_server_begin(&g_mach_server, handle_message)) {
         NSLog(@"[yabai-sa] now listening..");
     } else {
         NSLog(@"[yabai-sa] failed to spawn thread..");
     }
 }
 
+#pragma clang diagnostic pop
 @interface Payload : NSObject
 + (void) load;
 @end
