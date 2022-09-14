@@ -642,7 +642,19 @@ static void do_window_opacity(char *message)
     float alpha;
     unpack(message, alpha);
 
-    CGSSetWindowAlpha(_connection, wid, alpha);
+    pthread_mutex_lock(&window_fade_lock);
+    struct window_fade_context *context = table_find(&window_fade_table, &wid);
+
+    if (context) {
+        context->alpha = alpha;
+        context->duration = 0.f;
+        __asm__ __volatile__ ("" ::: "memory");
+
+        context->skip = true;
+    }
+    else
+      CGSSetWindowAlpha(_connection, wid, alpha);
+    pthread_mutex_unlock(&window_fade_lock);
 }
 
 static void *window_fade_thread_proc(void *data)

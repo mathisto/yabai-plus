@@ -24,9 +24,10 @@ static const char *layer_str[] =
 
 static inline float ease_in_out_back(float t)
 {
-    float c1 = 1.70158f;
-    float c2 = c1 * 1.525f;
-    return t < 0.5f ? (powf(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2 : (powf(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
+    return sin(M_PI / 2.f * t);
+    // float c1 = 1.70158f;
+    // float c2 = c1 * 1.525f;
+    // return t < 0.5f ? (powf(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2 : (powf(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
 }
 
 #define ANIMATE(animation_duration, easing_function, code_block)                       \

@@ -449,34 +449,44 @@ static void window_manager_create_window_proxy(struct window *window, struct win
 
     CFTypeRef frame_region;
     SLSGetWindowBounds(g_connection, window->id, &proxy->frame);
-    CGSNewRegionWithRect(&proxy->frame, &frame_region);
-    SLSNewWindow(g_connection, 2, 0, 0, frame_region, &proxy->wid);
 
-    int level = 0;
-    SLSGetWindowLevel(g_connection, window->id, &level);
+    if (!window->border.id) {
+      CGSNewRegionWithRect(&proxy->frame, &frame_region);
+      SLSNewWindow(g_connection, 2, 0, 0, frame_region, &proxy->wid);
 
-    uint64_t tag = 1ULL << 46;
-    SLSSetWindowTags(g_connection, proxy->wid, &tag, 64);
+      int level = 0;
+      SLSGetWindowLevel(g_connection, window->id, &level);
 
-    sls_window_disable_shadow(proxy->wid);
-    SLSSetWindowOpacity(g_connection, proxy->wid, 0);
-    SLSSetWindowResolution(g_connection, proxy->wid, 2.0f);
-    SLSSetWindowAlpha(g_connection, proxy->wid, 1.0f);
-    SLSSetWindowLevel(g_connection, proxy->wid, CGWindowLevelForKey(level));
-    proxy->context = SLWindowContextCreate(g_connection, proxy->wid, 0);
+      uint64_t tag = 1ULL << 46;
+      SLSSetWindowTags(g_connection, proxy->wid, &tag, 64);
 
-    CGRect frame = { {0, 0}, proxy->frame.size };
-    SLSDisableUpdate(g_connection);
-    SLSOrderWindow(g_connection, proxy->wid, 0, window->id);
-    CGContextClearRect(proxy->context, frame);
-    CGContextDrawImage(proxy->context, frame, (CGImageRef) CFArrayGetValueAtIndex(images, 0));
-    CGContextFlush(proxy->context);
-    SLSOrderWindow(g_connection, proxy->wid, -1, window->id);
-    scripting_addition_order_window(window->id, 0, 0);
-    SLSReenableUpdate(g_connection);
+      sls_window_disable_shadow(proxy->wid);
+      SLSSetWindowOpacity(g_connection, proxy->wid, 0);
+      SLSSetWindowResolution(g_connection, proxy->wid, 2.0f);
+      SLSSetWindowAlpha(g_connection, proxy->wid, 1.0f);
+      SLSSetWindowLevel(g_connection, proxy->wid, CGWindowLevelForKey(level));
+      proxy->context = SLWindowContextCreate(g_connection, proxy->wid, 0);
 
-    CFRelease(frame_region);
+      CGRect frame = { {0, 0}, proxy->frame.size };
+      SLSDisableUpdate(g_connection);
+      SLSOrderWindow(g_connection, proxy->wid, 0, window->id);
+      CGContextClearRect(proxy->context, frame);
+      CGContextDrawImage(proxy->context, frame, (CGImageRef) CFArrayGetValueAtIndex(images, 0));
+      CGContextFlush(proxy->context);
+      SLSOrderWindow(g_connection, proxy->wid, -1, window->id);
+      SLSReenableUpdate(g_connection);
+      CFRelease(frame_region);
+    } else {
+      SLSDisableUpdate(g_connection);
+      CGRect frame = proxy->frame;
+      frame.origin = (CGPoint){ BORDER_OFFSET, BORDER_OFFSET };
+      CGContextDrawImage(window->border.context, frame, (CGImageRef) CFArrayGetValueAtIndex(images, 0));
+      CGContextFlush(window->border.context);
+      SLSReenableUpdate(g_connection);
+    }
+
     CFRelease(images);
+    scripting_addition_set_opacity(window->id, 0.f, 0.f);
 }
 
 static void window_manager_destroy_window_proxy(struct window *window, struct window_proxy *proxy)
@@ -486,29 +496,40 @@ static void window_manager_destroy_window_proxy(struct window *window, struct wi
         SLSSetWindowTransform(g_connection, window->border.id, CGAffineTransformMakeTranslation(-window->frame.origin.x + BORDER_OFFSET, -window->frame.origin.y + BORDER_OFFSET));
         border_resize(window);
         SLSReenableUpdate(g_connection);
+    } else {
+      CGContextRelease(proxy->context);
+      SLSReleaseWindow(g_connection, proxy->wid);
     }
-    scripting_addition_order_window(window->id, 1, proxy->wid);
-    CGContextRelease(proxy->context);
-    SLSReleaseWindow(g_connection, proxy->wid);
+
+    float opacity = 1.f;
+    if (g_window_manager.enable_window_opacity) {
+        opacity = window->id == g_window_manager.focused_window_id
+                  ? g_window_manager.active_window_opacity
+                  : g_window_manager.normal_window_opacity;
+    }
+    scripting_addition_set_opacity(window->id, opacity, 0.f);
 }
 
-#define ANIMATE_WINDOW_ONE_FRAME(window, proxy, fx, fy, fw, fh)                                                                      \
-{                                                                                                                                    \
-    float target_x = lerp(proxy.frame.origin.x,    mt, fx);                                                                          \
-    float target_y = lerp(proxy.frame.origin.y,    mt, fy);                                                                          \
-    float target_w = lerp(proxy.frame.size.width,  mt, fw);                                                                          \
-    float target_h = lerp(proxy.frame.size.height, mt, fh);                                                                          \
-                                                                                                                                     \
-    CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x, -target_y);                                            \
-    CGAffineTransform scale = CGAffineTransformMakeScale(proxy.frame.size.width / target_w, proxy.frame.size.height / target_h);     \
-    CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                          \
-    SLSTransactionSetWindowTransform(transaction, proxy.wid, 0, 0, combined);                                                        \
-    if (window->border.id) {                                                                                                         \
-        CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x + BORDER_OFFSET, -target_y + BORDER_OFFSET);        \
-        CGAffineTransform scale = CGAffineTransformMakeScale((proxy.frame.size.width + BORDER_OFFSET) / (target_w + BORDER_OFFSET), (proxy.frame.size.height + BORDER_OFFSET) / (target_h + BORDER_OFFSET)); \
-        CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                      \
-        SLSTransactionSetWindowTransform(transaction, window->border.id, 0, 0, combined);                                            \
-    }                                                                                                                                \
+#define ANIMATE_WINDOW_ONE_FRAME(window, proxy, fx, fy, fw, fh)                                                                             \
+{                                                                                                                                           \
+    float target_x = lerp(proxy.frame.origin.x,    mt, fx);                                                                                 \
+    float target_y = lerp(proxy.frame.origin.y,    mt, fy);                                                                                 \
+    float target_w = lerp(proxy.frame.size.width,  mt, fw);                                                                                 \
+    float target_h = lerp(proxy.frame.size.height, mt, fh);                                                                                 \
+                                                                                                                                            \
+    if (window->border.id) {                                                                                                                \
+        float x_scale = (proxy.frame.size.width + BORDER_OFFSET) / (target_w + BORDER_OFFSET);                                              \
+        float y_scale = (proxy.frame.size.height + BORDER_OFFSET) / (target_h + BORDER_OFFSET);                                             \
+        CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x + (float)BORDER_OFFSET, -target_y + (float)BORDER_OFFSET); \
+        CGAffineTransform scale = CGAffineTransformMakeScale(x_scale, y_scale);                                                             \
+        CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                             \
+        SLSTransactionSetWindowTransform(transaction, window->border.id, 0, 0, combined);                                                   \
+    } else {                                                                                                                                \
+        CGAffineTransform transform = CGAffineTransformMakeTranslation(-target_x, -target_y);                                               \
+        CGAffineTransform scale = CGAffineTransformMakeScale(proxy.frame.size.width / target_w, proxy.frame.size.height / target_h);        \
+        CGAffineTransform combined = CGAffineTransformConcat(transform, scale);                                                             \
+        SLSTransactionSetWindowTransform(transaction, proxy.wid, 0, 0, combined);                                                           \
+    }                                                                                                                                       \
 }
 
 void window_manager_animate_window_list(struct window_animation *window_list, int window_count)
